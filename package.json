@@ -1,0 +1,16 @@
+{
+  "name": "webrtc-chat-js",
+  "version": "1.0.0",
+  "description": "WebRTC Chat JS Client",
+  "main": "src/index.js",
+  "scripts": {
+    "build": "webpack -p --progress --colors"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/AquiGorkaNet/webrtc-chat-js.git"
+  },
+  "author": "Gorka",
+  "license": "MIT",
+  "dependencies": {}
+}
