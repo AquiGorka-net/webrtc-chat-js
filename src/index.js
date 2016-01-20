@@ -1,9 +1,31 @@
 "use strict";
 
+/*
+data.item = {
+	time
+	data: {
+		msg
+		user
+		...etc
+	}
+	id
+}
+*/
+
 var Peer = require('peerjs'),
 	Events = require('events');
 
-var mergeArray = function(arr1, arr2, maxLength) {
+var mergeArray = function(arr1, arr2) {
+	return arr1.concat(arr2)
+				.reduce(function(p, c) {
+					if (p.indexOf(c) === -1) {
+						p.push(c);
+					}
+					return p;
+				}, []);
+};
+
+var mergeChat = function(arr1, arr2, maxLength) {
 	var arrF = arr1.concat(arr2)
 					.reduce(function (p, c) {
 						var exists = p.filter(function(item) {
@@ -29,71 +51,58 @@ var Broadcaster = function(opts) {
 	var that = this;
 	this.peers = [];
 	this.data = [];
+	this.network = opts.network;
 	//
-	var peer = new Peer(opts.network, { key: opts.apiKey });
-	peer.on('error', function(err) {
-		if (err.type === 'unavailable-id') {
-			console.log('Broadcaster exists');
-		}
-	});
+	var peer = new Peer(opts.network, { key: opts.apiKey, config: { iceServers: [ { url: 'stun:stun.l.google.com:19302' } ]} });
 	peer.on('open', function(id) {
-		console.log('Broadcaster created');
+		//console.log('Broadcaster created');
 		peer.on('connection', that._newConnection.bind(that));
 	});
-	
 };
 Broadcaster.prototype._newConnection = function(conn) {
-	console.log('Broadcaster new connection: ', conn)
+	//console.log('Broadcaster new connection: ', conn.peer)
 	var that = this;
-	if (this.peers.indexOf(conn) < 0) {
+	if (this.peers.indexOf(conn) === -1) {
 		this.peers.push(conn);
-		this._notifyNetwork({
-			msg: 'connection',
-			data: {
-				connections: this.peers.map(function(conn) {
-					return conn.peer;
-				})
-			}
-		});
 	}
 	conn.on('data', function(obj) {
-		console.log('Broadcaster conn.on.data: ', obj);
-		switch (obj.msg) {
-			case 'update':
-				that.data = mergeArray(that.data, obj.data, that.maxItems);
-				that._notifyNetwork({
-					msg: 'update',
-					data: that.data
-				});
-				break;
-		}
+		//console.log('Broadcaster conn.on.data: ', obj);
+		var newData = {
+			time: Date.now(),
+			data: obj,
+			id: Date.now() + '-' + that.network + '-' + conn.peer
+		};
+		that.data = mergeChat(that.data, [newData], that.maxItems);
+		that._notifyNetwork({
+			msg: 'update',
+			data: that.data
+		});
 	});
 	conn.on('close', function() {
 		that.peers.splice(that.peers.indexOf(conn), 1);
 	});
 };
 Broadcaster.prototype._notifyNetwork = function(data) {
+	//console.log('Broadcaster notify ', this.peers, data);
 	this.peers.forEach(function(conn) {
 		conn.send(data);
 	});
 };
 
 var Chat = function(opts) {
-	this.opts = opts;
 	if (opts && opts.apiKey) {
 		Events.EventEmitter.call(this);
 		//
-		this.network = opts.network || 'webrtc-chat';
-		this.peers = [];
-		this.peersIds = [];
-		this.data = [];
+		this.network = opts.network || 'webrtc-chat-' + Math.random();
+		this.apiKey = opts.apiKey;
 		this.maxItems = opts.maxItems || 5;
+		this.data = [];
+		this.broadcasterConnection = null;
 		this.broadcaster = new Broadcaster({
 			network: this.network,
-			apiKey: opts.apiKey
+			apiKey: this.apiKey
 		});
-		this.peer = new Peer({ key: opts.apiKey });
-		this.peer.on('connection', this._newConnection.bind(this));
+		this.peer = new Peer({ key: this.apiKey, config: { iceServers: [ { url: 'stun:stun.l.google.com:19302' } ]} });
 	} else {
 		console.warn('WebRTC Chat JS: error: constructor: please provide a peerjs api key');
 		return null;
@@ -102,225 +111,50 @@ var Chat = function(opts) {
 Chat.prototype = Object.create(Events.EventEmitter.prototype);
 
 Chat.prototype.connect = function() {
-	return this._connectToPeer(this.network);
-};
-Chat.prototype._connectToPeer = function(id) {
 	var that = this;
 	return new Promise(function(resolve, reject) {
-		var conn = that.peer.connect(id);
+		var conn = that.peer.connect(that.network);
 		that.peer.on('error', reject);
 		that.peer.on('open', function() {
-			console.log('Network joined; My id: ', that.peer.id);
+			console.log('Chat joined network; Chat id: ', that.peer.id);
 			that._newConnection(conn);
 			resolve();
 		});
 	});
 };
 Chat.prototype._newConnection = function(conn) {
-	console.log('Peer new connection: ', conn)
+	//console.log('Chat new connection: ', conn)
 	var that = this;
-	if (this.peers.indexOf(conn) < 0) {
-		this.peers.push(conn);
-	}
+	this.broadcasterConnection = conn;
 	conn.on('data', function(obj) {
-		console.log('Chat conn.on.data: ', obj);
+		//console.log('Chat conn.on.data: ', obj);
 		switch (obj.msg) {
-			case 'connection':
-				// maybe a mix?
-				that.peersIds = mergeArray(that.peersIds, obj.data.connections);
-				break;
 			case 'update':
-				that.data = mergeArray(that.data, obj.data, that.maxItems);
-				that.emit('update');
+				that.data = mergeChat(that.data, obj.data, that.maxItems);
+				that.emit('update', that.data);
 				break;
 		}
 	});
-	// this is actually the broadcaster
 	conn.on('close', function() {
-		that.peers.splice(that.peers.indexOf(conn), 1);
-	});
-};
-Chat.prototype._notifyConnections = function(data) {
-	this.peers.forEach(function(conn) {
-		conn.send(data);
+		//console.log('We\'ve lost the broadcaster');
+		that.broadcasterConnection = null;
+		that.broadcaster = new Broadcaster({
+			network: that.network,
+			apiKey: that.apiKey
+		});
+		var old_id = that.peer.id;
+		that.peer.destroy();
+		setTimeout(function() {
+			that.peer = new Peer(old_id, { key: that.apiKey, config: { iceServers: [ { url: 'stun:stun.l.google.com:19302' } ]} });
+			that.connect();
+		}, 1000);
 	});
 };
 Chat.prototype.send = function(data) {
-	this.data = mergeArray(this.data, [{
-		time: Date.now(),
-		data: data,
-		id: Date.now() + '-' + this.network + '-' + this.peer.id
-	}], this.maxItems);
-	this._notifyConnections({
-		msg: 'update',
-		data: this.data
-	});
-	this.emit('update');
+	if (this.broadcasterConnection) {
+		this.broadcasterConnection.send(data);
+	}
 };
 
 
 module.exports = Chat;
-
-/*
-data.item = {
-	time
-	data: {
-		msg
-		user
-		...etc
-	}
-	id
-}
-*/
-/*
-var mergeArray = function(arr1, arr2, maxLength) {
-	var arrF = arr1.concat(arr2)
-					.reduce(function (p, c) {
-						var exists = p.filter(function(item) {
-							return item.id === c.id;
-						});
-						if (exists.length === 0) {
-							p.push(c);
-						}
-						return p;
-					}, [])
-					.sort(function(a, b) {
-						return b.time - a.time;
-					});
-	arrF.length = Math.min(maxLength, arrF.length);
-	return arrF;
-};
-
-var Chat = function(opts) {
-	this.peers = [];
-	this.data = [];
-	this.maxItems = 5;
-	this.id = Math.floor(Math.random() * 10000000);
-	this.network = Math.floor(Math.random() * 10000000);
-	//
-	if (opts && opts.maxItems) {
-		this.maxItems = opts.maxItems;
-	}
-	//
-	Events.EventEmitter.call(this);
-};
-Chat.prototype = Object.create(Events.EventEmitter.prototype);
-
-Chat.prototype.connect = function(opts) {
-	var that = this;
-	if (opts && opts.apiKey) {
-		if (opts && opts.id) {
-			this.network = opts.id;
-			return new Promise(function(resolve, reject) {
-				that._startNetwork(opts)
-					.then(function() {
-						resolve(opts.id);
-					})
-					.catch(function(err) {
-						// peer network exists with such id
-						//console.log(err.type)
-						if (err.type === 'unavailable-id') {
-							that._connectToPeer(opts).then(function () {
-								resolve(opts.id);
-							});
-						} else {
-							reject(err);
-						}
-					});
-			});
-		} else {
-			return Promise.reject('WebRTC Chat JS: Error: connect: please provide an id (unique identifier for the chat network)');
-		}
-	} else {
-		return Promise.reject('WebRTC Chat JS: Error: connect: please provide a peerjs api key');
-	}
-};
-Chat.prototype._connectToPeer = function(opts) {
-	var that = this;
-	return new Promise(function(resolve, reject) {
-		var peer = new Peer({ key: opts.apiKey });
-		var conn = peer.connect(opts.id);
-		peer.on('open', function() {
-			console.log('Network joined; My id: ', peer.id);
-			that.id = peer.id;
-			that._newConnection(conn);
-			resolve();
-		});
-		peer.on('connection', that._newConnection.bind(that));
-	});
-};
-Chat.prototype._newConnection = function(conn) {
-	console.log('new connection: ', conn)
-	var that = this;
-	if (this.peers.indexOf(conn) < 0) {
-		this.peers.push(conn);
-		this._notifyConnections({
-			msg: 'connection',
-			data: {
-				connections: this.peers.map(function(conn) {
-					return conn.peer;
-				})
-			}
-		});
-	}
-	conn.on('data', function(obj) {
-		switch (obj.msg) {
-			case 'close':
-				// look for a better way to interpret this
-				//this.peers = obj.data.connections;
-				break;
-			case 'connection':
-				// maybe a mix?
-				//this.peers = obj.data.connections
-				console.log('what should I do? : ', obj)
-
-				break;
-			case 'update':
-				that.data = mergeArray(that.data, obj.data, that.maxItems);
-				that.emit('update');
-				break;
-		}
-	});
-	//
-	//conn.on('close', function() {
-	//	that.peers.splice(that.peers.indexOf(conn), 1);
-	//	that._notifyConnections({
-	//		msg: 'close',
-	//		connections: that.peers
-	//	});
-	//});
-	//
-};
-Chat.prototype._notifyConnections = function(data) {
-	this.peers.forEach(function(conn) {
-		conn.send(data);
-	});
-};
-Chat.prototype._startNetwork = function(opts) {
-	var that = this;
-	return new Promise(function(resolve, reject) {
-		var peer = new Peer(opts.id, { key: opts.apiKey });
-		peer.on('error', reject);
-		peer.on('open', function(id) {
-			console.log('Network started; My id: ', peer.id, ' or ', id);
-			that.id = peer.id;
-			resolve();
-		});
-		peer.on('connection', that._newConnection.bind(that));
-	});
-};
-Chat.prototype.send = function(data) {
-	this.data = mergeArray(this.data, [{
-		time: Date.now(),
-		data: data,
-		id: Date.now() + '-' + this.network + '-' + this.id
-	}], this.maxItems);
-	this._notifyConnections({
-		msg: 'update',
-		data: this.data
-	});
-	this.emit('update');
-};
-
-module.exports = Chat;
-*/
